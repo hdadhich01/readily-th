@@ -103,7 +103,16 @@ async def extract_metadata(text_chunk: str, filename: str) -> Dict:
                     response_mime_type="application/json"
                 ),
             )
-            return json.loads(response.text)
+            data = json.loads(response.text)
+            if isinstance(data, list):
+                if len(data) > 0:
+                    return data[0]
+                else:
+                    return {
+                        "title": filename,
+                        "summary": "Empty metadata list returned.",
+                    }
+            return data
         except Exception as e:
             if "429" in str(e) or "Resource exhausted" in str(e):
                 wait = base_delay * (2**retries)
@@ -135,6 +144,9 @@ async def process_pdf(
                 full_text += f"\n--- Page {i+1} ---\n{page_text}"
 
             if not full_text.strip():
+                print(
+                    f"Skipping {filename}: No text extracted. (Is this a scanned image?)"
+                )
                 return
 
             # Heuristic for Policy ID (e.g., "GA.7110" from "GA.7110 Street Medicine.pdf")
@@ -522,4 +534,5 @@ async def batch_evaluate_endpoint(req: BatchEvaluationRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
