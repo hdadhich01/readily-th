@@ -11,9 +11,10 @@
 - [ ] Refine: Exact Citations & Reasoning
   - [ ] Update `process_pdf` to include `total_pages` metadata <!-- id: 21 -->
   - [ ] Update Evaluation Prompt for Stability & Consistent "No" Evidence <!-- id: 22 -->
-  - [ ] Update Frontend Header Styling (Filename, Pg X/Y, Italic Title) <!-- id: 23 -->
+  - [x] Update Frontend Header Styling (Filename, Pg X/Y, Italic Title) <!-- id: 23 -->
+  - [x] Migrate to Google GenAI SDK & Gemini 3 Models <!-- id: 25 -->
+  - [x] Configure "Thinking High" for Compliance Reasoning <!-- id: 26 -->
   - [ ] Verify Output Consistency <!-- id: 24 -->
-  - [ ] Implement Long-Context Evaluation <!-- id: 17 -->
 - [x] API Implementation
   - [x] Create `/health` endpoint <!-- id: 5 -->
   - [x] Create `/upload_questionnaire` endpoint (PDF to Questions JSON) <!-- id: 6 -->

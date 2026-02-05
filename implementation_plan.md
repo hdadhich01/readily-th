@@ -19,45 +19,48 @@ The system will ingest PDF policies, index them using SQLite FTS5, and provide e
 
 The backend will be contained within `backend/`.
 
-#### [MODIFY] [requirements.txt](file:///home/hdadhich/readily-TH/backend/requirements.txt)
+#### [MODIFY] [requirements.txt](file:///home/hdadhich/readily-TH/requirements.txt)
 
 - Add dependencies: `fastapi`, `uvicorn[standard]`, `python-multipart`, `pymupdf` (fitz), `google-generativeai`, `python-dotenv`.
 - **Note**: Dependencies will not be pinned to specific versions to avoid conflicts/staleness, as requested.
 
 ### Backend Structure
 
-#### [MODIFY] [main.py](file:///home/hdadhich/readily-TH/backend/main.py)
+### Backend Structure
 
-**Refactoring for Document-Level RAG:**
+#### [MODIFY] [main.py](file:///home/hdadhich/readily-TH/main.py)
+
+**SDK & Model Migration:**
+
+- **SDK**: Switched from `google.generativeai` to **`google.genai`** to support advanced thinking configurations.
+- **Models**:
+  - **Extraction/Routing**: `gemini-2.0-flash` (Fast).
+  - **Compliance Evaluation**: `gemini-3-flash-preview` with **`thinking_level="high"`** (Reasoning).
+
+**Core Logic:**
 
 1.  **Database Setup (`init_db`)**:
     - **New Table**: `policies_fts` (Document-Level).
-    - **Schema**: `(file_id, policy_number, title, summary, full_text)`.
-    - _Note_: We will drop/replace the old `pages_fts` table.
+    - **Schema**: `(file_id, policy_number, title, summary, total_pages, full_text)`.
 
-2.  **Policy Ingestion (`index_policies_document_level`)**:
+2.  **Policy Ingestion (`index_policies`)**:
     - Scan `policies/` recursively.
-    - For each PDF:
-      - **Page-Aware Text Extraction**: Concatenate text with `--- Page {n} ---` delimiters.
-      - **Metadata**: Extract Title, Summary, and **Total Pages**.
-      - Insert into `policies_fts`.
+    - **Page-Aware Text Extraction**: Concatenate text with `--- Page {n} ---` delimiters.
+    - **Metadata**: Extract Title, Summary, and **Total Pages** using `gemini-2.0-flash`.
 
 3.  **LLM Router & Evaluation (`evaluate_single`)**:
-    - **Step 1: Topic Extraction**: Identify search terms.
+    - **Step 1: Topic Extraction**: Identify search terms using `gemini-2.0-flash`.
     - **Step 2: Document Routing**: Search `policies_fts`.
-    - **Step 3: Long-Context Eval**:
-      - **Prompt Update**:
-        - Enforce strict "Evidence" formatting for YES/NO/UNCERTAIN.
-        - For "NO": Require contradictory text OR "Not found" statement in code block.
-        - Reduce Variance: Add "Chain of Thought" requirement (hidden) or stricter rules for "Uncertain".
+    - **Step 3: Long-Context Eval**: Use `gemini-3-flash-preview` (Thinking High) for definitive YES/NO analysis.
 
 4.  **API Endpoints**:
-    - Retain existing endpoints but update logic to use the new pipeline.
+    - `upload_questionnaire`: Uses `gemini-2.0-flash` to extract questions from full PDF text.
+    - `evaluate`: Uses the multi-step RAG pipeline.
 
 ### Directory Structure
 
-- `backend/policies/`: Directory to place PDF files. (User needs to populate this).
-- `backend/audit.db`: SQLite database (auto-generated).
+- `policies/`: Directory to place PDF files.
+- `audit.db`: SQLite database (auto-generated).
 
 ## Verification Plan
 
@@ -77,7 +80,7 @@ We will use `curl` or a simple python script to test the endpoints.
 
 ## Frontend Implementation (Added)
 
-### [NEW] [templates/index.html](file:///home/hdadhich/readily-TH/backend/templates/index.html)
+### [NEW] [templates/index.html](file:///home/hdadhich/readily-TH/templates/index.html)
 
 - Simple HTML5 page with Tailwind CDN (for basic styling).
 - **Features**:

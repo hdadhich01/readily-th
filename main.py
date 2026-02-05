@@ -1,5 +1,6 @@
 import asyncio
 import glob
+import json
 import os
 import re
 import sqlite3
@@ -10,12 +11,21 @@ import dotenv
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
+
+# New Google GenAI SDK
+# We transitioned to this SDK to support 'thinking_config' for Gemini 3
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 
 dotenv.load_dotenv()
 
 DB_PATH = "audit.db"
 POLICIES_DIR = "policies"
+
+# Initialize Global Client
+# This client handles all interactions with the Gemini API
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 def get_db_connection():
@@ -25,15 +35,18 @@ def get_db_connection():
 
 
 def init_db():
+    """Initializes the SQLite database with FTS5 support."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Enable FTS5
+
+    # Enable FTS5 Extension (Full Text Search)
     try:
         cursor.execute("SELECT load_extension('fts5');")
     except:
         pass
 
-    # Check for schema migration (total_pages)
+    # Schema Migration: Check if 'total_pages' column exists
+    # If not, drop and recreate the table (simple migration strategy)
     try:
         cursor.execute("SELECT total_pages FROM policies_fts LIMIT 1")
     except sqlite3.OperationalError:
@@ -41,7 +54,8 @@ def init_db():
         cursor.execute("DROP TABLE IF EXISTS policies_fts")
         conn.commit()
 
-    # Create the virtual table
+    # Create the virtual table for policy searching
+    # We use FTS5 for efficient text matching on title, summary, and full_text
     cursor.execute(
         """
     CREATE VIRTUAL TABLE IF NOT EXISTS policies_fts USING fts5(
@@ -60,7 +74,10 @@ def init_db():
 
 
 async def extract_metadata(text_chunk: str, filename: str) -> Dict:
-    """Uses Gemini to extract a clean Title and Summary from the policy header."""
+    """
+    Uses Gemini (Fast Model) to extract a clean Title and Summary from the policy header.
+    We use the fast model here because this is a simple extraction task.
+    """
     prompt = f"""
     Analyze the following text (first few pages of a policy document).
     Extract the official POLICY TITLE and a 1-sentence SUMMARY.
@@ -77,8 +94,14 @@ async def extract_metadata(text_chunk: str, filename: str) -> Dict:
 
     while retries < max_retries:
         try:
-            response = await fast_model.generate_content_async(
-                prompt, generation_config={"response_mime_type": "application/json"}
+            # FAST MODEL: gemini-2.0-flash
+            # Efficient for metadata extraction
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
             )
             return json.loads(response.text)
         except Exception as e:
@@ -97,12 +120,16 @@ async def extract_metadata(text_chunk: str, filename: str) -> Dict:
 async def process_pdf(
     pdf_path: str, sem: asyncio.Semaphore, cursor_queue: asyncio.Queue
 ):
-    """Reads PDF, extracts metadata, puts SQL params into queue."""
+    """
+    Reads PDF, extracts metadata, and prepares data for DB insertion.
+    Uses a semaphore to limit concurrent processing.
+    """
     async with sem:
         try:
             doc = fitz.open(pdf_path)
             full_text = ""
-            # Extract full text with Page Markers for citation
+            # Extract full text with explicit Page Markers
+            # This allows the LLM to cite specific pages later (e.g., "Page 3")
             for i, page in enumerate(doc):
                 page_text = page.get_text()
                 full_text += f"\n--- Page {i+1} ---\n{page_text}"
@@ -114,12 +141,13 @@ async def process_pdf(
             filename = os.path.basename(pdf_path)
             policy_number = filename.split(" ")[0].strip()
 
-            # Extract Metadata (Title/Summary) using first 2 pages
-            # We use the LLM for this to get high quality routing data
+            # Extract Metadata (Title/Summary) using first few pages
+            # We use the LLM for this to get high quality data for identifying documents
             metadata = await extract_metadata(full_text[:5000], filename)
             total_pages = len(doc)
 
-            # Put result in queue for the main thread to write (SQLite is not thread-safe for writes)
+            # Put result in queue for the main thread to write
+            # (SQLite writes must be serialized, hence the queue)
             await cursor_queue.put(
                 (
                     filename,
@@ -138,7 +166,7 @@ async def process_pdf(
 
 
 async def db_writer(queue: asyncio.Queue, total_files: int):
-    """Consumes the queue and writes to DB."""
+    """Background task that consumes processed PDFs from queue and writes to SQLite."""
     conn = get_db_connection()
     cursor = conn.cursor()
     processed_count = 0
@@ -158,11 +186,11 @@ async def db_writer(queue: asyncio.Queue, total_files: int):
 
 
 async def index_policies():
-    """Main ingestion entry point."""
+    """Main ingestion function. Scans directory and starts processing."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Check if populated
+    # Check if DB is already populated to avoid re-indexing on every restart
     try:
         cursor.execute("SELECT count(*) FROM policies_fts")
         if cursor.fetchone()[0] > 0:
@@ -170,29 +198,30 @@ async def index_policies():
             conn.close()
             return
     except:
-        pass  # Table might exist but be empty
+        pass
 
     print("Starting Document-Level Ingestion...")
     pdf_files = glob.glob(os.path.join(POLICIES_DIR, "**", "*.pdf"), recursive=True)
+    if not pdf_files:
+        print("No PDFs found in policies directory.")
+        conn.close()
+        return
+
     print(f"Found {len(pdf_files)} PDFs.")
 
-    # Increased concurrency for paid tier users (w/ retry backoff safety)
+    # Limit concurrency to avoid overloading system/API
     sem = asyncio.Semaphore(20)
     queue = asyncio.Queue()
 
-    # Start writer task
     writer_task = asyncio.create_task(db_writer(queue, len(pdf_files)))
-
-    # Run processing tasks
     await asyncio.gather(*[process_pdf(f, sem, queue) for f in pdf_files])
-
-    # Wait for writer to finish
     await writer_task
     print("Ingestion Complete.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Lifecycle manager: Runs ingestion on startup."""
     init_db()
     # Run ingestion content in background/startup
     await index_policies()
@@ -217,26 +246,10 @@ def health_check():
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    with open("templates/index.html", "r") as f:
-        return f.read()
-
-
-import asyncio
-import json
-
-# Initialize Gemini Models
-# Initialize Gemini Models
-import google.generativeai as genai
-
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# FAST MODEL: gemini-2.0-flash
-# Used for: Extraction, Routing, Summarization
-fast_model = genai.GenerativeModel("gemini-2.0-flash")
-
-# COMPLIANCE MODEL: gemini-3-flash-preview
-# Used for: Deep Reasoning / Compliance Checks
-compliance_model = genai.GenerativeModel("gemini-3-flash-preview")
+    if os.path.exists("templates/index.html"):
+        with open("templates/index.html", "r") as f:
+            return f.read()
+    return "<h1>Readily-TH Backend Running</h1>"
 
 
 class EvaluationRequest(BaseModel):
@@ -249,7 +262,16 @@ class BatchEvaluationRequest(BaseModel):
 
 
 async def evaluate_single(req: EvaluationRequest) -> Dict:
-    # STEP 1: Identify Topic (Routing)
+    """
+    Core RAG Function:
+    1. Identify search terms (Routing)
+    2. Retrieve documents (FTS)
+    3. Evaluate compliance (Thinking Model)
+    """
+
+    # ---------------------------------------------------------
+    # STEP 1: Identify Topic (Routing) - FAST MODEL
+    # ---------------------------------------------------------
     topic_prompt = f"""
     Based on this audit question, what are the specific 3 search terms I should use to find the relevant policy document?
     Focus on specific policy NAMES (e.g. "Hospice", "Claims Payment", "Grievances") and UNIQUE IDS if implied.
@@ -260,29 +282,30 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
     """
 
     try:
-        topic_res = await fast_model.generate_content_async(
-            topic_prompt, generation_config={"response_mime_type": "application/json"}
+        # We use Gemini 2.0 Flash for this simple reasoning task to save latency
+        topic_res = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=topic_prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         search_terms = json.loads(topic_res.text)
         print(f"Router Terms: {search_terms}")
     except Exception as e:
         print(f"Router Error: {e}")
-        search_terms = [req.question]  # Fallback
+        search_terms = [req.question]
 
-    # STEP 2: Route to Documents
+    # ---------------------------------------------------------
+    # STEP 2: Route to Documents (FTS Retrieval)
+    # ---------------------------------------------------------
     conn = get_db_connection()
     cursor = conn.cursor()
     matched_policies = []
 
-    # Search for each term using OR-like logic (collecting top hits)
     for term in search_terms:
-        # Sanitize term for FTS: remove non-alphanumeric chars (except spaces) to avoid syntax errors
-        # FTS5 treats special chars like "-", ".", ":" as operators or column names if not careful
+        # Sanitize term for FTS: remove non-alphanumeric chars (except spaces)
         safe_term = re.sub(r"[^a-zA-Z0-9 ]", "", term)
-
-        # Search Title, Summary, and Policy Number with high weight, full text with lower weight
-        # Note: FTS5 simple match is easiest here. We'll search across all cols.
         try:
+            # Matches against title, summary, policy_number, and full_text
             cursor.execute(
                 """
                 SELECT file_id, policy_number, title, total_pages, full_text
@@ -295,18 +318,17 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
             )
             matched_policies.extend([dict(row) for row in cursor.fetchall()])
         except Exception as e:
-            print(f"Search Error for '{term}' (safe: '{safe_term}'): {e}")
+            print(f"Search Error for '{term}': {e}")
 
     conn.close()
 
-    # Deduplicate by file_id
+    # Deduplicate results found by multiple terms
     unique_policies = {}
     for p in matched_policies:
         unique_policies[p["file_id"]] = p
 
-    # If no results, try a broader search with the whole question keywords (last resort)
+    # If no documents found, return early to avoid hallucination
     if not unique_policies:
-        # ... logic omitted for brevity, returning "uncertain" is safer than hallucinating
         return {
             "question": req.question,
             "met": "uncertain",
@@ -318,11 +340,11 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
             },
         }
 
-    # STEP 3: Long Context Evaluation
-    # Concatenate full texts
+    # ---------------------------------------------------------
+    # STEP 3: Long Context Evaluation - COMPLIANCE MODEL (Reasoning)
+    # ---------------------------------------------------------
     context_text = ""
     for p in list(unique_policies.values())[:2]:
-        # Ensure total_pages is an integer or string, default to '?'
         t_pages = p.get("total_pages")
         if t_pages is None:
             t_pages = "?"
@@ -369,19 +391,26 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
     - If UNCERTAIN: Explain in 'reason'.
     """
 
+    # Retry logic for Rate Limits (429)
     retries = 0
     max_retries = 3
     base_delay = 5
 
     while retries <= max_retries:
         try:
-            response = await compliance_model.generate_content_async(
-                eval_prompt,
-                generation_config={"response_mime_type": "application/json"},
+            # COMPLIANCE MODEL: gemini-3-flash-preview
+            # CONFIG: "Thinking High" ->  Models detailed thought process before answering.
+            # This is crucial for complex compliance logic.
+            response = await client.aio.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=eval_prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_level="high"),
+                ),
             )
             result = json.loads(response.text)
 
-            # Robustness: Handle case where LLM returns a list [ {...} ] instead of just {...}
             if isinstance(result, list):
                 if len(result) > 0:
                     result = result[0]
@@ -403,7 +432,7 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
                         "question": req.question,
                         "met": "uncertain",
                         "evidence": {
-                            "reason": "Rate limit exceeded. Please try batch evaluation with fewer items."
+                            "reason": "Rate limit exceeded. Try batch evaluation with fewer items."
                         },
                     }
                 wait = base_delay * (2**retries)
@@ -421,6 +450,10 @@ async def evaluate_single(req: EvaluationRequest) -> Dict:
 
 @app.post("/upload_questionnaire")
 async def upload_questionnaire(file: UploadFile = File(...)):
+    """
+    Endpoint to process an uploaded PDF questionnaire.
+    Extracts questions using Gemini 2.0 Flash (Fast).
+    """
     # Save temp file
     temp_path = f"temp_{file.filename}"
     with open(temp_path, "wb") as f:
@@ -447,8 +480,12 @@ async def upload_questionnaire(file: UploadFile = File(...)):
         {text}
         """
 
-        response = await fast_model.generate_content_async(
-            prompt, generation_config={"response_mime_type": "application/json"}
+        # FAST MODEL: gemini-2.0-flash
+        # We use the fast model here because extraction is a simple pattern matching task.
+        response = await client.aio.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
         questions = json.loads(response.text)
         return questions
@@ -462,7 +499,6 @@ async def upload_questionnaire(file: UploadFile = File(...)):
 
 @app.post("/process_question")
 async def process_question_endpoint(req: EvaluationRequest):
-    """Processes a single question. Usage: Frontend calls this in parallel loop."""
     return await evaluate_single(req)
 
 
@@ -473,8 +509,7 @@ async def evaluate_endpoint(req: EvaluationRequest):
 
 @app.post("/batch_evaluate")
 async def batch_evaluate_endpoint(req: BatchEvaluationRequest):
-    # Process in parallel with a semaphore to avoid rate limits
-    sem = asyncio.Semaphore(10)  # 10 concurrent requests
+    sem = asyncio.Semaphore(10)
 
     async def bound_evaluate(q):
         async with sem:
