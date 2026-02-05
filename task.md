@@ -1,23 +1,26 @@
+# Project Tasks
+
 - [x] Planning & Setup
-  - [x] Create implementation plan <!-- id: 0 -->
-  - [x] Define dependencies in `requirements.txt` <!-- id: 1 -->
+  - [x] Create implementation plan
+  - [x] Define dependencies in `requirements.txt`
 - [x] Core Infrastructure
-  - [x] Implement database setup (SQLite + FTS5) in `main.py` <!-- id: 2 -->
-  - [x] Implement PDF processing logic (text extraction, chunking) <!-- id: 3 -->
-  - [x] Implement policy ingestion on startup <!-- id: 4 -->
+  - [x] Implement database setup (SQLite + FTS5) in `main.py`
+  - [x] Implement PDF processing logic (text extraction, chunking)
+  - [x] Implement policy ingestion on startup
 - [x] Frontend Implementation
-  - [x] Create `templates/index.html` with vanilla JS <!-- id: 12 -->
-  - [x] Update `main.py` to serve static HTML <!-- id: 13 -->
-- [ ] Refine: Exact Citations & Reasoning
-  - [ ] Update `process_pdf` to include `total_pages` metadata <!-- id: 21 -->
-  - [ ] Update Evaluation Prompt for Stability & Consistent "No" Evidence <!-- id: 22 -->
-  - [x] Update Frontend Header Styling (Filename, Pg X/Y, Italic Title) <!-- id: 23 -->
-  - [x] Migrate to Google GenAI SDK & Gemini 3 Models <!-- id: 25 -->
-  - [x] Configure "Thinking High" for Compliance Reasoning <!-- id: 26 -->
-  - [ ] Verify Output Consistency <!-- id: 24 -->
+  - [x] Create `templates/index.html` with vanilla JS
+  - [x] Update `main.py` to serve static HTML
+- [x] Refine: Exact Citations & Reasoning
+  - [x] Update `process_pdf` to include `total_pages` metadata
+  - [x] Update Evaluation Prompt for Stability & Consistent "No" Evidence
+  - [x] Update Frontend Header Styling (Filename, Pg X/Y, Italic Title)
+  - [x] Migrate to Google GenAI SDK & Gemini 3 Models
+  - [x] Configure "Thinking High" for Compliance Reasoning
+  - [x] Verify Output Consistency
+  - [x] Implement Long-Context Evaluation
 - [x] API Implementation
-  - [x] Create `/health` endpoint <!-- id: 5 -->
-  - [x] Create `/upload_questionnaire` endpoint (PDF to Questions JSON) <!-- id: 6 -->
-  - [x] Create `/evaluate` endpoint (Single question RAG) <!-- id: 7 -->
-  - [x] Create `/batch_evaluate` endpoint <!-- id: 8 -->
-  - [x] Configure Port for Render Deployment <!-- id: 9 -->
+  - [x] Create `/health` endpoint
+  - [x] Create `/upload_questionnaire` endpoint (PDF to Questions JSON)
+  - [x] Create `/evaluate` endpoint (Single question RAG)
+  - [x] Create `/batch_evaluate` endpoint
+  - [x] Configure Port for Render Deployment

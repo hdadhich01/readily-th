@@ -1,96 +1,70 @@
-# Healthcare Compliance RAG Backend Implementation Plan
+# Readily Take-Home: Compliance Audit System
 
-## Goal
+## 1. Goal
 
-Build a FastAPI backend that serves as a RAG (Retrieval-Augmented Generation) system for healthcare policy compliance audits.
-The system will ingest PDF policies, index them using SQLite FTS5, and provide endpoints to extract questions from audit PDFs and evaluate them against the indexed policies using Google's Gemini model.
+Build a robust RAG (Retrieval-Augmented Generation) system for healthcare policy compliance audits. The system ingests PDF policies, extracts requirements from questionnaires, and uses advanced LLM reasoning to determine compliance with precise evidence.
 
-## User Review Required
+## 2. System Architecture
 
-> [!NOTE]
-> **Frontend Exclusion**: The original Perplexity plan included HTML templates in `main.py`. Per your request to "leave frontend alone" and use "bolt.new" later, this plan **excludes** all HTML/CSS serving. `main.py` will be a pure JSON REST API.
+### A. Technology Stack
 
-> [!IMPORTANT]
-> **API Keys**: You will need to provide a `GEMINI_API_KEY` in a `.env` file in the `backend/` directory.
+- **Backend**: FastAPI (Python), Uvicorn
+- **Database**: SQLite with **FTS5 extension** (Full-Text Search)
+- **LLM Provider**: **Google Gemini (GenAI SDK)**
+- **Frontend**: HTML5 + Tailwind CSS (Vanilla JS)
+- **PDF Processing**: PyMuPDF (`fitz`)
 
-## Proposed Changes
+### B. Core Components
 
-### Backend Structure
+#### 1. Gemini Model Strategy
 
-The backend will be contained within `backend/`.
+To balance performance and reasoning depth, the system uses two distinct model configurations:
 
-#### [MODIFY] [requirements.txt](file:///home/hdadhich/readily-TH/requirements.txt)
+- **`gemini-2.0-flash`**: Used for **Fast Tasks**.
+  - _Use Case_: Metadata extraction, Search term generation (Routing), and Questionnaire parsing.
+  - _Benefit_: Low latency and high throughput.
+- **`gemini-3-flash-preview`**: Used for **Deep Reasoning**.
+  - _Configuration_: `thinking_config: { thinking_level: "high" }`
+  - _Use Case_: Compliance evaluation. This model "thinks" before answering, effectively simulating an auditor's chain of thought to reduce hallucinations and improve precision.
 
-- Add dependencies: `fastapi`, `uvicorn[standard]`, `python-multipart`, `pymupdf` (fitz), `google-generativeai`, `python-dotenv`.
-- **Note**: Dependencies will not be pinned to specific versions to avoid conflicts/staleness, as requested.
+#### 2. RAG Pipeline (`evaluate_single`)
 
-### Backend Structure
+The evaluation flow matches "Document-Level" retrieval concepts:
 
-### Backend Structure
+1.  **Topic Extraction**: The question is sent to `gemini-2.0-flash` to generate 3 specific search keywords (e.g., "Hospice Election Form").
+2.  **Document Retrieval**: We query the `policies_fts` table using FTS5 to find the top 2 most relevant _full documents_.
+3.  **Context Assembly**: Full text of relevant policies (with page markers) is injected into the context window.
+4.  **Reasoning**: `gemini-3-flash-preview` evaluates the requirement against the policies. It is instructed to be **Strict** (Evidence Required) and categorize as **YES**, **NO**, or **UNCERTAIN**.
 
-#### [MODIFY] [main.py](file:///home/hdadhich/readily-TH/main.py)
+#### 3. Data Ingestion
 
-**SDK & Model Migration:**
+- **Folder Scanning**: Recursively reads all `.pdf` files in the `policies/` directory.
+- **Page-Aware Extraction**: Text is extracted with `--- Page X ---` delimiters to enable page-level citations.
+- **Indexing**: Metadata (Title, Summary, Total Pages) is extracted via LLM and stored in SQLite `policies_fts`.
 
-- **SDK**: Switched from `google.generativeai` to **`google.genai`** to support advanced thinking configurations.
-- **Models**:
-  - **Extraction/Routing**: `gemini-2.0-flash` (Fast).
-  - **Compliance Evaluation**: `gemini-3-flash-preview` with **`thinking_level="high"`** (Reasoning).
+## 3. Directory Structure
 
-**Core Logic:**
+```
+/
+├── main.py              # Single-file FastAPI application
+├── requirements.txt     # Python dependencies
+├── audit.db             # Generated SQLite database (FTS5)
+├── policies/            # [Input] Folder for Policy PDFs
+└── templates/
+    └── index.html       # Frontend UI
+```
 
-1.  **Database Setup (`init_db`)**:
-    - **New Table**: `policies_fts` (Document-Level).
-    - **Schema**: `(file_id, policy_number, title, summary, total_pages, full_text)`.
+## 4. Frontend Features
 
-2.  **Policy Ingestion (`index_policies`)**:
-    - Scan `policies/` recursively.
-    - **Page-Aware Text Extraction**: Concatenate text with `--- Page {n} ---` delimiters.
-    - **Metadata**: Extract Title, Summary, and **Total Pages** using `gemini-2.0-flash`.
+- **Clean UI**: Tailwind CSS based interface.
+- **Questionnaire Upload**: Parses unstructured PDF questionnaires into a structured table of requirements.
+- **Batch Processing**: Evaluates requirements in parallel (browser-managed concurrency).
+- **Results Validation**:
+  - **Green/Red/Yellow badges** for Met/Not Met/Uncertain.
+  - **Citations**: Lists Policy Name and **Page Number**.
+  - **Evidence**: Displays the verbatim excerpt or a gap statement.
 
-3.  **LLM Router & Evaluation (`evaluate_single`)**:
-    - **Step 1: Topic Extraction**: Identify search terms using `gemini-2.0-flash`.
-    - **Step 2: Document Routing**: Search `policies_fts`.
-    - **Step 3: Long-Context Eval**: Use `gemini-3-flash-preview` (Thinking High) for definitive YES/NO analysis.
+## 5. Deployment Notes
 
-4.  **API Endpoints**:
-    - `upload_questionnaire`: Uses `gemini-2.0-flash` to extract questions from full PDF text.
-    - `evaluate`: Uses the multi-step RAG pipeline.
-
-### Directory Structure
-
-- `policies/`: Directory to place PDF files.
-- `audit.db`: SQLite database (auto-generated).
-
-## Verification Plan
-
-### Automated Tests
-
-We will use `curl` or a simple python script to test the endpoints.
-
-1.  **Startup**: Run the server and ensure `audit.db` is created and populated (requires at least one PDF in `policies/`).
-2.  **Health Check**: `curl http://localhost:8000/health` should return `{"status": "ok", "pages_indexed": N}`.
-3.  **Extraction**: Upload a dummy PDF to `/extract_questions` and check JSON structure.
-4.  **Evaluation**: Send a sample question to `/evaluate` and check if it finds evidence (requires a relevant PDF policy).
-
-### Manual Verification
-
-- User will need to drop their provided PDFs into `backend/policies/`.
-- We will verify the FTS5 search manually by querying the DB if needed.
-
-## Frontend Implementation (Added)
-
-### [NEW] [templates/index.html](file:///home/hdadhich/readily-TH/templates/index.html)
-
-- Simple HTML5 page with Tailwind CDN (for basic styling).
-- **Features**:
-  - File input for PDF upload.
-  - "Process" button to call `/upload_questionnaire`.
-  - Dynamic table to show extracted questions.
-  - "Evaluate All" button to call `/batch_evaluate`.
-  - Status badges (Green/Red/Yellow) for compliance results.
-
-### [MODIFY] [main.py](file:///home/hdadhich/readily-TH/backend/main.py)
-
-- Import `HTMLResponse`.
-- Add route `GET /` that reads and returns `templates/index.html`.
+- **Port Binding**: The app binds to `os.environ.get("PORT")` to support cloud platforms like Render/Heroku.
+- **Dependencies**: Uses `google-genai` (New SDK). `google-generativeai` is excluded to avoid namespace conflicts.
